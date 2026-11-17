@@ -1,0 +1,648 @@
+name: Build APK
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/apk.yml'
+permissions:
+  contents: write
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+      - name: Write project files
+        run: |
+          set -e
+          mkdir -p android/app
+          cat > android/app/build.gradle <<'PLAN_EOF'
+          plugins {
+              id 'com.android.application'
+          }
+          android {
+              namespace 'com.farkinda.plan'
+              compileSdk 34
+              defaultConfig {
+                  applicationId 'com.farkinda.plan'
+                  minSdk 28
+                  targetSdk 34
+                  versionCode 1
+                  versionName '0.1'
+              }
+              signingConfigs {
+                  rel {
+                      storeFile file(System.getenv('KS_PATH') ?: 'none.jks')
+                      storePassword System.getenv('KS_PASS')
+                      keyAlias 'plan'
+                      keyPassword System.getenv('KS_PASS')
+                  }
+              }
+              buildTypes {
+                  release {
+                      minifyEnabled false
+                      signingConfig signingConfigs.rel
+                  }
+              }
+              lint {
+                  checkReleaseBuilds false
+                  abortOnError false
+              }
+              compileOptions {
+                  sourceCompatibility JavaVersion.VERSION_17
+                  targetCompatibility JavaVersion.VERSION_17
+              }
+          }
+          PLAN_EOF
+          mkdir -p android/app/src/main
+          cat > android/app/src/main/AndroidManifest.xml <<'PLAN_EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <uses-permission android:name="android.permission.INTERNET"/>
+              <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
+              <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT"/>
+              <uses-permission android:name="android.permission.WAKE_LOCK"/>
+              <uses-permission android:name="android.permission.VIBRATE"/>
+              <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED"/>
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK"/>
+
+              <application
+                  android:label="Günlük Plan"
+                  android:icon="@android:drawable/ic_lock_idle_alarm"
+                  android:theme="@android:style/Theme.Material.Light.NoActionBar"
+                  android:allowBackup="false"
+                  android:usesCleartextTraffic="false">
+
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true"
+                      android:launchMode="singleTask"
+                      android:configChanges="orientation|screenSize|keyboardHidden|smallestScreenSize|screenLayout">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN"/>
+                          <category android:name="android.intent.category.LAUNCHER"/>
+                      </intent-filter>
+                  </activity>
+
+                  <activity
+                      android:name=".AlarmActivity"
+                      android:exported="false"
+                      android:launchMode="singleInstance"
+                      android:excludeFromRecents="true"
+                      android:showWhenLocked="true"
+                      android:turnScreenOn="true"/>
+
+                  <service
+                      android:name=".AlarmService"
+                      android:exported="false"
+                      android:foregroundServiceType="mediaPlayback"/>
+
+                  <receiver android:name=".AlarmReceiver" android:exported="false"/>
+
+                  <receiver android:name=".BootReceiver" android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.BOOT_COMPLETED"/>
+                          <action android:name="android.intent.action.MY_PACKAGE_REPLACED"/>
+                      </intent-filter>
+                  </receiver>
+              </application>
+          </manifest>
+          PLAN_EOF
+          mkdir -p android/app/src/main/java/com/farkinda/plan
+          cat > android/app/src/main/java/com/farkinda/plan/AlarmActivity.java <<'PLAN_EOF'
+          package com.farkinda.plan;
+
+          import android.app.Activity;
+          import android.content.Intent;
+          import android.graphics.Color;
+          import android.graphics.Typeface;
+          import android.os.Bundle;
+          import android.view.Gravity;
+          import android.view.View;
+          import android.view.WindowManager;
+          import android.widget.Button;
+          import android.widget.LinearLayout;
+          import android.widget.TextView;
+
+          public class AlarmActivity extends Activity {
+              static AlarmActivity cur;
+
+              @Override
+              protected void onCreate(Bundle b) {
+                  super.onCreate(b);
+                  cur = this;
+                  setShowWhenLocked(true);
+                  setTurnScreenOn(true);
+                  getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+                  final Intent in = getIntent();
+                  String title = in.getStringExtra("title");
+                  String time = in.getStringExtra("time");
+
+                  LinearLayout root = new LinearLayout(this);
+                  root.setOrientation(LinearLayout.VERTICAL);
+                  root.setGravity(Gravity.CENTER);
+                  root.setBackgroundColor(Color.parseColor("#2b59c3"));
+                  root.setPadding(48, 48, 48, 48);
+
+                  TextView t1 = new TextView(this);
+                  t1.setText("⏰ " + (time == null ? "" : time));
+                  t1.setTextColor(Color.WHITE);
+                  t1.setTextSize(30);
+                  t1.setGravity(Gravity.CENTER);
+                  root.addView(t1);
+
+                  TextView t2 = new TextView(this);
+                  t2.setText(title == null ? "" : title);
+                  t2.setTextColor(Color.WHITE);
+                  t2.setTextSize(36);
+                  t2.setTypeface(Typeface.DEFAULT_BOLD);
+                  t2.setGravity(Gravity.CENTER);
+                  t2.setPadding(0, 40, 0, 60);
+                  root.addView(t2);
+
+                  Button ok = new Button(this);
+                  ok.setText("Tamam");
+                  ok.setTextSize(22);
+                  ok.setOnClickListener(new View.OnClickListener() {
+                      public void onClick(View v) {
+                          send("STOP", in);
+                      }
+                  });
+                  root.addView(ok);
+
+                  Button sn = new Button(this);
+                  sn.setText("5 dk ertele");
+                  sn.setTextSize(18);
+                  sn.setOnClickListener(new View.OnClickListener() {
+                      public void onClick(View v) {
+                          send("SNOOZE", in);
+                      }
+                  });
+                  root.addView(sn);
+
+                  setContentView(root);
+              }
+
+              void send(String act, Intent src) {
+                  Intent s = new Intent(this, AlarmService.class);
+                  s.setAction(act);
+                  s.putExtra("title", src.getStringExtra("title"));
+                  s.putExtra("say", src.getStringExtra("say"));
+                  s.putExtra("time", src.getStringExtra("time"));
+                  s.putExtra("lang", src.getStringExtra("lang"));
+                  startService(s);
+                  finish();
+              }
+
+              @Override
+              protected void onDestroy() {
+                  if (cur == this) cur = null;
+                  super.onDestroy();
+              }
+          }
+          PLAN_EOF
+          mkdir -p android/app/src/main/java/com/farkinda/plan
+          cat > android/app/src/main/java/com/farkinda/plan/AlarmReceiver.java <<'PLAN_EOF'
+          package com.farkinda.plan;
+
+          import android.content.BroadcastReceiver;
+          import android.content.Context;
+          import android.content.Intent;
+
+          public class AlarmReceiver extends BroadcastReceiver {
+              @Override
+              public void onReceive(Context c, Intent i) {
+                  // Uygulama açıkken sesi ve ekranı web uygulaması kendisi veriyor.
+                  if (Sched.fg) return;
+                  Intent s = new Intent(c, AlarmService.class);
+                  s.putExtra("title", i.getStringExtra("title"));
+                  s.putExtra("say", i.getStringExtra("say"));
+                  s.putExtra("time", i.getStringExtra("time"));
+                  s.putExtra("lang", i.getStringExtra("lang"));
+                  c.startForegroundService(s);
+              }
+          }
+          PLAN_EOF
+          mkdir -p android/app/src/main/java/com/farkinda/plan
+          cat > android/app/src/main/java/com/farkinda/plan/AlarmService.java <<'PLAN_EOF'
+          package com.farkinda.plan;
+
+          import android.app.Notification;
+          import android.app.NotificationChannel;
+          import android.app.NotificationManager;
+          import android.app.PendingIntent;
+          import android.app.Service;
+          import android.content.Context;
+          import android.content.Intent;
+          import android.content.pm.ServiceInfo;
+          import android.media.AudioAttributes;
+          import android.media.AudioManager;
+          import android.media.Ringtone;
+          import android.media.RingtoneManager;
+          import android.os.Build;
+          import android.os.Bundle;
+          import android.os.Handler;
+          import android.os.IBinder;
+          import android.os.Looper;
+          import android.os.PowerManager;
+          import android.speech.tts.TextToSpeech;
+          import java.util.Locale;
+
+          public class AlarmService extends Service implements TextToSpeech.OnInitListener {
+              static final String CH = "alarm";
+              Handler h = new Handler(Looper.getMainLooper());
+              TextToSpeech tts;
+              boolean ready = false, active = false;
+              String title = "", say = "", time = "", lang = "tr";
+              int count = 0;
+              Ringtone rt;
+              PowerManager.WakeLock wl;
+
+              final Runnable loop = new Runnable() {
+                  public void run() {
+                      if (!active || !ready) return;
+                      Bundle b = new Bundle();
+                      b.putInt(TextToSpeech.Engine.KEY_PARAM_STREAM, AudioManager.STREAM_ALARM);
+                      tts.speak(say, TextToSpeech.QUEUE_FLUSH, b, "a");
+                      count++;
+                      if (count < 6) h.postDelayed(this, 25000);
+                  }
+              };
+
+              @Override
+              public IBinder onBind(Intent i) {
+                  return null;
+              }
+
+              @Override
+              public int onStartCommand(Intent in, int flags, int id) {
+                  if (in == null) {
+                      stopSelf();
+                      return START_NOT_STICKY;
+                  }
+                  String t = in.getStringExtra("title");
+                  if (t != null) title = t;
+                  String s = in.getStringExtra("say");
+                  if (s != null) say = s;
+                  String tm = in.getStringExtra("time");
+                  if (tm != null) time = tm;
+                  String lg = in.getStringExtra("lang");
+                  if (lg != null) lang = lg;
+                  String act = in.getAction();
+                  if ("STOP".equals(act)) {
+                      finishAlarm();
+                      return START_NOT_STICKY;
+                  }
+                  if ("SNOOZE".equals(act)) {
+                      Sched.set(this, System.currentTimeMillis() + 300000L, title, say, time, lang);
+                      finishAlarm();
+                      return START_NOT_STICKY;
+                  }
+
+                  NotificationManager nm = (NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);
+                  NotificationChannel ch = new NotificationChannel(CH, "Alarmlar", NotificationManager.IMPORTANCE_HIGH);
+                  ch.setSound(null, null);
+                  ch.enableVibration(true);
+                  ch.setLockscreenVisibility(Notification.VISIBILITY_PUBLIC);
+                  nm.createNotificationChannel(ch);
+
+                  Intent ai = new Intent(this, AlarmActivity.class);
+                  ai.putExtra("title", title);
+                  ai.putExtra("say", say);
+                  ai.putExtra("time", time);
+                  ai.putExtra("lang", lang);
+                  ai.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP);
+                  PendingIntent fp = PendingIntent.getActivity(this, 1, ai,
+                          PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT);
+                  PendingIntent stop = act("STOP", 2);
+                  PendingIntent snz = act("SNOOZE", 3);
+
+                  Notification n = new Notification.Builder(this, CH)
+                          .setSmallIcon(android.R.drawable.ic_lock_idle_alarm)
+                          .setContentTitle(time + " — " + title)
+                          .setContentText(say)
+                          .setCategory(Notification.CATEGORY_ALARM)
+                          .setOngoing(true)
+                          .setFullScreenIntent(fp, true)
+                          .setContentIntent(fp)
+                          .addAction(0, "Tamam", stop)
+                          .addAction(0, "5 dk ertele", snz)
+                          .build();
+                  if (Build.VERSION.SDK_INT >= 29) {
+                      startForeground(1, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK);
+                  } else {
+                      startForeground(1, n);
+                  }
+
+                  active = true;
+                  count = 0;
+                  PowerManager pm = (PowerManager) getSystemService(Context.POWER_SERVICE);
+                  wl = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "plan:alarm");
+                  wl.acquire(200000L);
+                  try {
+                      rt = RingtoneManager.getRingtone(this, RingtoneManager.getDefaultUri(RingtoneManager.TYPE_ALARM));
+                      rt.setAudioAttributes(new AudioAttributes.Builder()
+                              .setUsage(AudioAttributes.USAGE_ALARM)
+                              .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION).build());
+                      rt.play();
+                  } catch (Exception e) {
+                  }
+                  h.postDelayed(new Runnable() {
+                      public void run() {
+                          try {
+                              if (rt != null) rt.stop();
+                          } catch (Exception e) {
+                          }
+                      }
+                  }, 2500);
+                  if (tts == null) tts = new TextToSpeech(this, this);
+                  else if (ready) h.postDelayed(loop, 2600);
+                  h.postDelayed(new Runnable() {
+                      public void run() {
+                          finishAlarm();
+                      }
+                  }, 170000);
+                  return START_NOT_STICKY;
+              }
+
+              PendingIntent act(String a, int code) {
+                  Intent i = new Intent(this, AlarmService.class);
+                  i.setAction(a);
+                  i.putExtra("title", title);
+                  i.putExtra("say", say);
+                  i.putExtra("time", time);
+                  i.putExtra("lang", lang);
+                  return PendingIntent.getService(this, code, i,
+                          PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT);
+              }
+
+              @Override
+              public void onInit(int status) {
+                  if (status == TextToSpeech.SUCCESS) {
+                      try {
+                          tts.setLanguage("en".equals(lang) ? Locale.US : new Locale("tr", "TR"));
+                      } catch (Exception e) {
+                      }
+                      ready = true;
+                      if (active) h.postDelayed(loop, 2600);
+                  }
+              }
+
+              void finishAlarm() {
+                  active = false;
+                  h.removeCallbacksAndMessages(null);
+                  try {
+                      if (tts != null) {
+                          tts.stop();
+                          tts.shutdown();
+                      }
+                  } catch (Exception e) {
+                  }
+                  tts = null;
+                  ready = false;
+                  try {
+                      if (rt != null) rt.stop();
+                  } catch (Exception e) {
+                  }
+                  try {
+                      if (wl != null && wl.isHeld()) wl.release();
+                  } catch (Exception e) {
+                  }
+                  if (AlarmActivity.cur != null) AlarmActivity.cur.finish();
+                  stopForeground(true);
+                  stopSelf();
+              }
+
+              @Override
+              public void onDestroy() {
+                  h.removeCallbacksAndMessages(null);
+                  super.onDestroy();
+              }
+          }
+          PLAN_EOF
+          mkdir -p android/app/src/main/java/com/farkinda/plan
+          cat > android/app/src/main/java/com/farkinda/plan/BootReceiver.java <<'PLAN_EOF'
+          package com.farkinda.plan;
+
+          import android.content.BroadcastReceiver;
+          import android.content.Context;
+          import android.content.Intent;
+
+          public class BootReceiver extends BroadcastReceiver {
+              @Override
+              public void onReceive(Context c, Intent i) {
+                  String json = c.getSharedPreferences(Sched.PREFS, 0).getString(Sched.KEY, "[]");
+                  Sched.apply(c, json);
+              }
+          }
+          PLAN_EOF
+          mkdir -p android/app/src/main/java/com/farkinda/plan
+          cat > android/app/src/main/java/com/farkinda/plan/MainActivity.java <<'PLAN_EOF'
+          package com.farkinda.plan;
+
+          import android.Manifest;
+          import android.app.Activity;
+          import android.content.Intent;
+          import android.net.Uri;
+          import android.os.Build;
+          import android.os.Bundle;
+          import android.view.WindowManager;
+          import android.webkit.JavascriptInterface;
+          import android.webkit.WebSettings;
+          import android.webkit.WebView;
+          import android.webkit.WebViewClient;
+
+          public class MainActivity extends Activity {
+              static final String HOME = "https://alopromotion.com/plan/";
+              WebView w;
+
+              @Override
+              protected void onCreate(Bundle b) {
+                  super.onCreate(b);
+                  getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+                  w = new WebView(this);
+                  setContentView(w);
+                  WebSettings s = w.getSettings();
+                  s.setJavaScriptEnabled(true);
+                  s.setDomStorageEnabled(true);
+                  s.setMediaPlaybackRequiresUserGesture(false);
+                  w.addJavascriptInterface(new Bridge(), "AndroidAlarm");
+                  w.setWebViewClient(new WebViewClient() {
+                      @Override
+                      public boolean shouldOverrideUrlLoading(WebView v, android.webkit.WebResourceRequest r) {
+                          String u = r.getUrl().toString();
+                          if (u.startsWith(HOME)) return false;
+                          try {
+                              startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(u)));
+                          } catch (Exception e) {
+                          }
+                          return true;
+                      }
+                  });
+                  if (b == null) w.loadUrl(HOME);
+                  else w.restoreState(b);
+                  if (Build.VERSION.SDK_INT >= 33) {
+                      requestPermissions(new String[]{Manifest.permission.POST_NOTIFICATIONS}, 1);
+                  }
+              }
+
+              @Override
+              protected void onSaveInstanceState(Bundle o) {
+                  super.onSaveInstanceState(o);
+                  w.saveState(o);
+              }
+
+              @Override
+              protected void onResume() {
+                  super.onResume();
+                  Sched.fg = true;
+                  w.onResume();
+              }
+
+              @Override
+              protected void onPause() {
+                  Sched.fg = false;
+                  w.onPause();
+                  super.onPause();
+              }
+
+              @Override
+              public void onBackPressed() {
+                  if (w.canGoBack()) w.goBack();
+                  else moveTaskToBack(true);
+              }
+
+              class Bridge {
+                  @JavascriptInterface
+                  public void setAlarms(String json) {
+                      Sched.apply(getApplicationContext(), json);
+                  }
+
+                  @JavascriptInterface
+                  public String version() {
+                      return "1";
+                  }
+              }
+          }
+          PLAN_EOF
+          mkdir -p android/app/src/main/java/com/farkinda/plan
+          cat > android/app/src/main/java/com/farkinda/plan/Sched.java <<'PLAN_EOF'
+          package com.farkinda.plan;
+
+          import android.app.AlarmManager;
+          import android.app.PendingIntent;
+          import android.content.Context;
+          import android.content.Intent;
+          import android.content.SharedPreferences;
+          import android.net.Uri;
+          import org.json.JSONArray;
+          import org.json.JSONObject;
+
+          public class Sched {
+              static final String PREFS = "plan";
+              static final String KEY = "alarms";
+              static volatile boolean fg = false;
+
+              static PendingIntent pi(Context c, long t, String title, String say, String time, String lang, int flags) {
+                  Intent i = new Intent(c, AlarmReceiver.class);
+                  i.setData(Uri.parse("plan://alarm/" + t));
+                  i.putExtra("title", title);
+                  i.putExtra("say", say);
+                  i.putExtra("time", time);
+                  i.putExtra("lang", lang);
+                  return PendingIntent.getBroadcast(c, (int) (t / 60000L), i, flags);
+              }
+
+              static void set(Context c, long t, String title, String say, String time, String lang) {
+                  AlarmManager am = (AlarmManager) c.getSystemService(Context.ALARM_SERVICE);
+                  Intent show = new Intent(c, MainActivity.class);
+                  PendingIntent sp = PendingIntent.getActivity(c, 0, show,
+                          PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT);
+                  PendingIntent p = pi(c, t, title, say, time, lang,
+                          PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
+                  am.setAlarmClock(new AlarmManager.AlarmClockInfo(t, sp), p);
+              }
+
+              static void cancelAll(Context c, String json) {
+                  try {
+                      AlarmManager am = (AlarmManager) c.getSystemService(Context.ALARM_SERVICE);
+                      JSONArray a = new JSONArray(json);
+                      for (int i = 0; i < a.length(); i++) {
+                          long t = a.getJSONObject(i).getLong("t");
+                          PendingIntent p = pi(c, t, "", "", "", "",
+                                  PendingIntent.FLAG_NO_CREATE | PendingIntent.FLAG_IMMUTABLE);
+                          if (p != null) {
+                              am.cancel(p);
+                              p.cancel();
+                          }
+                      }
+                  } catch (Exception e) {
+                  }
+              }
+
+              static void apply(Context c, String json) {
+                  SharedPreferences sp = c.getSharedPreferences(PREFS, 0);
+                  cancelAll(c, sp.getString(KEY, "[]"));
+                  try {
+                      JSONArray in = new JSONArray(json);
+                      JSONArray keep = new JSONArray();
+                      long now = System.currentTimeMillis();
+                      for (int i = 0; i < in.length() && keep.length() < 80; i++) {
+                          JSONObject o = in.getJSONObject(i);
+                          long t = o.getLong("t");
+                          if (t > now + 1000) {
+                              keep.put(o);
+                              set(c, t, o.optString("title"), o.optString("say"), o.optString("time"), o.optString("lang", "tr"));
+                          }
+                      }
+                      sp.edit().putString(KEY, keep.toString()).apply();
+                  } catch (Exception e) {
+                  }
+              }
+          }
+          PLAN_EOF
+          mkdir -p android/.
+          cat > android/build.gradle <<'PLAN_EOF'
+          plugins {
+              id 'com.android.application' version '8.5.2' apply false
+          }
+          PLAN_EOF
+          mkdir -p android/.
+          cat > android/gradle.properties <<'PLAN_EOF'
+          org.gradle.jvmargs=-Xmx2g
+          android.useAndroidX=false
+          android.nonTransitiveRClass=true
+          PLAN_EOF
+          mkdir -p android/.
+          cat > android/settings.gradle <<'PLAN_EOF'
+          pluginManagement {
+              repositories { google(); mavenCentral(); gradlePluginPortal() }
+          }
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories { google(); mavenCentral() }
+          }
+          rootProject.name = "plan"
+          include ':app'
+          PLAN_EOF
+      - name: Build
+        env:
+          KS_PASS: planplan123
+        run: |
+          keytool -genkeypair -keystore "$RUNNER_TEMP/plan.jks" -storepass "$KS_PASS" -keypass "$KS_PASS" -alias plan -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Gunluk Plan"
+          export KS_PATH="$RUNNER_TEMP/plan.jks"
+          cd android
+          gradle --no-daemon assembleRelease
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cp android/app/build/outputs/apk/release/app-release.apk plan.apk
+          gh release delete apk -y --cleanup-tag -R "$GITHUB_REPOSITORY" || true
+          gh release create apk plan.apk -R "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title "Gunluk Plan APK" --notes "Telefona kurulacak APK"
